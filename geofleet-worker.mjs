@@ -77,7 +77,7 @@ async function syncPositions() {
   try {
     const res = await httpsRequest(
       `https://secure.geofleet.eu/geoapi/v2.0/account/objects?apikey=${GEOFLEET_API_KEY}`,
-      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.2' } }
+      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.3' } }
     );
     if (res.statusCode !== 200) throw new Error(`GeoFleet API ${res.statusCode}`);
     const data = JSON.parse(res.body);
@@ -160,11 +160,11 @@ async function syncTripsIncremental() {
         const isoDatum = isoDate(dateObj);    // YYYY-MM-DD for Supabase
         try {
           // CORRECT URL: /reports for objects/trip (with spaces encoded as %20)
-          const tripUrl = `https://secure.geofleet.eu/geoapi/v2.0/reports%20for%20objects/trip?apikey=${GEOFLEET_API_KEY}&id=${v.idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`;
+          const tripUrl = `https://secure.geofleet.eu/geoapi/v2.0/report/trip?apikey=${GEOFLEET_API_KEY}&id=${v.idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`;
           console.log(`[TRIPS] Fetching: ${v.idcode} ${datum}`);
           
           const tripRes = await httpsRequest(tripUrl, {
-            headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.2' }
+            headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.3' }
           });
           
           console.log(`[TRIPS] ${v.idcode} ${datum}: status=${tripRes.statusCode}`);
@@ -238,7 +238,7 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/status') {
     res.end(JSON.stringify({
-      status: 'running', version: '3.2', uptime: process.uptime(),
+      status: 'running', version: '3.3', uptime: process.uptime(),
       lastSync, lastTripSync, syncCount, tripSyncCount,
       vehicleCount, tripCount, tripOffset,
       totalVehicles: allVehicles.length, lastError, lastTripError,
@@ -250,12 +250,12 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error: e.message }));
     });
   } else {
-    res.end(JSON.stringify({ ok: true, message: 'GeoFleet Worker v3.2 — /status /trips/sync' }));
+    res.end(JSON.stringify({ ok: true, message: 'GeoFleet Worker v3.3 — /status /trips/sync' }));
   }
 });
 
 server.listen(PORT, () => {
-  console.log(`GeoFleet Worker v3.2 listening on :${PORT}`);
+  console.log(`GeoFleet Worker v3.3 listening on :${PORT}`);
   syncPositions();
   setInterval(syncPositions, SYNC_INTERVAL);
   setTimeout(() => {
