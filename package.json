@@ -1,0 +1,21 @@
+{
+  "name": "geofleet",
+  "version": "1.0.0",
+  "description": "",
+  "main": "geofleet-worker.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mustique37/geofleet-worker.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Mustique37/geofleet-worker/issues"
+  },
+  "homepage": "https://github.com/Mustique37/geofleet-worker#readme"
+}
