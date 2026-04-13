@@ -1,5 +1,4 @@
 import http from 'node:http';
-
 import https from 'node:https';
 
 const GEOFLEET_HOST = 'secure.geofleet.eu';
@@ -72,7 +71,7 @@ function mapObjectToRow(object) {
 
 async function writeToBackend(rows, serviceKey, supabaseUrl) {
   const cacheResponse = await httpsRequest(
-    `${supabaseUrl}/rest/v1/geofleet_cache`,
+    `${supabaseUrl}/rest/v1/geofleet_cache?on_conflict=idcode`,
     {
       method: 'POST',
       headers: {
