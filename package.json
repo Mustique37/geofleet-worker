@@ -1,8 +1,16 @@
 {
   "name": "geofleet-worker",
+  "version": "3.5.1",
   "private": true,
   "type": "module",
+  "main": "geofleet-worker.mjs",
   "scripts": {
     "start": "node geofleet-worker.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.56.0"
   }
 }
