@@ -8,7 +8,7 @@ import * as tls from 'node:tls';
 import * as net from 'node:net';
 import http from 'node:http';
 
-const GEOFLEET_HOST = 'secure.geofleet.eu';
+const GEOFLEET_HOST = 'dev.geofleet.eu';
 const GEOFLEET_API_KEY = process.env.GEOFLEET_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
