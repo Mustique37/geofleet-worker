@@ -164,10 +164,10 @@ syncPositions();
 setInterval(syncPositions, SYNC_INTERVAL);
 
 // Optional: HTTP API for on-demand trip reports (port 3847)
-const HTTP_PORT = parseInt(process.env.HTTP_PORT || '3847');
+const PORT = parseInt(process.env.PORT || '3847');
 const http = await import('node:http');
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${HTTP_PORT}`);
+  const url = new URL(req.url, `http://localhost:${PORT}`);
   
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -203,8 +203,8 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Niet gevonden. Gebruik /status, /sync, of /trip?idcode=X&datum=YYYY-MM-DD' }));
 });
 
-server.listen(HTTP_PORT, () => {
-  log(`📡 HTTP API beschikbaar op http://localhost:${HTTP_PORT}`);
+server.listen(PORT, () => {
+  log(`📡 HTTP API beschikbaar op http://localhost:${PORT}`);
   log(`   GET /status — Worker status`);
   log(`   GET /sync   — Forceer sync`);
   log(`   GET /trip?idcode=X&datum=YYYY-MM-DD — Haal ritten op`);
