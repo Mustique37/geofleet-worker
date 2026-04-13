@@ -1,7 +1,8 @@
 /**
- * GeoFleet Railway Worker v3.1
+ * GeoFleet Railway Worker v3.2
  * - Syncs live positions to geofleet_cache + geofleet_history (every 30s)
  * - Fetches trip reports incrementally (3 vehicles per cycle, every 60s)
+ * - FIXED: correct Trip API URL and date format
  */
 import http from 'node:http';
 import https from 'node:https';
@@ -12,16 +13,17 @@ const GEOFLEET_API_KEY = process.env.GEOFLEET_API_KEY || '';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const SYNC_INTERVAL = 30_000;
-const TRIP_INTERVAL = 60_000; // every 60s, process 3 vehicles
+const TRIP_INTERVAL = 60_000;
 
 let lastSync = null;
 let lastTripSync = null;
 let syncCount = 0;
 let tripSyncCount = 0;
 let lastError = null;
+let lastTripError = null;
 let vehicleCount = 0;
 let tripCount = 0;
-let tripOffset = 0; // track which vehicles we've processed
+let tripOffset = 0;
 let allVehicles = [];
 
 function httpsRequest(url, options = {}, body = null) {
@@ -75,14 +77,13 @@ async function syncPositions() {
   try {
     const res = await httpsRequest(
       `https://secure.geofleet.eu/geoapi/v2.0/account/objects?apikey=${GEOFLEET_API_KEY}`,
-      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.1' } }
+      { headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.2' } }
     );
     if (res.statusCode !== 200) throw new Error(`GeoFleet API ${res.statusCode}`);
     const data = JSON.parse(res.body);
     const objects = data.objects || [];
     vehicleCount = objects.length;
 
-    // Update vehicle list for trip sync
     allVehicles = objects.map(o => ({
       idcode: o.idcode,
       nummerplaat: o.information?.numberPlate || null,
@@ -127,6 +128,19 @@ async function syncPositions() {
   }
 }
 
+// ─── Helper: format date as YYYY/MM/DD (GeoFleet format) ───
+function geoDate(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}/${mm}/${dd}`;
+}
+
+// ─── Helper: format date as YYYY-MM-DD (ISO for Supabase) ───
+function isoDate(d) {
+  return d.toISOString().split('T')[0];
+}
+
 // ─── Incremental Trip Sync (3 vehicles per cycle) ───
 async function syncTripsIncremental() {
   if (allVehicles.length === 0) return;
@@ -136,31 +150,46 @@ async function syncTripsIncremental() {
     const batch = allVehicles.slice(tripOffset, tripOffset + BATCH);
     tripOffset += BATCH;
 
-    const today = new Date().toISOString().split('T')[0];
-    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    const today = new Date();
+    const yesterday = new Date(Date.now() - 86400000);
     let batchTrips = 0;
 
     for (const v of batch) {
-      for (const datum of [yesterday, today]) {
+      for (const dateObj of [yesterday, today]) {
+        const datum = geoDate(dateObj);       // YYYY/MM/DD for GeoFleet API
+        const isoDatum = isoDate(dateObj);    // YYYY-MM-DD for Supabase
         try {
-          const tripRes = await httpsRequest(
-            `https://secure.geofleet.eu/geoapi/v2.0/reports/trips?apikey=${GEOFLEET_API_KEY}&id=${v.idcode}&from=${datum}&fromtime=00:00&to=${datum}&totime=23:59`,
-            { headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.1' } }
-          );
-          if (tripRes.statusCode !== 200) continue;
+          // CORRECT URL: /reports for objects/trip (with spaces encoded as %20)
+          const tripUrl = `https://secure.geofleet.eu/geoapi/v2.0/reports%20for%20objects/trip?apikey=${GEOFLEET_API_KEY}&id=${v.idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`;
+          console.log(`[TRIPS] Fetching: ${v.idcode} ${datum}`);
+          
+          const tripRes = await httpsRequest(tripUrl, {
+            headers: { 'Content-Type': 'application/json', 'User-Agent': 'GeoFleetWorker/3.2' }
+          });
+          
+          console.log(`[TRIPS] ${v.idcode} ${datum}: status=${tripRes.statusCode}`);
+          
+          if (tripRes.statusCode !== 200) {
+            lastTripError = `${v.idcode}: HTTP ${tripRes.statusCode}`;
+            continue;
+          }
+          
           const tripData = JSON.parse(tripRes.body);
-          const trips = tripData.tripResults || tripData.trips || [];
+          const trips = tripData.results || tripData.tripResults || tripData.trips || [];
+          
+          console.log(`[TRIPS] ${v.idcode} ${datum}: ${trips.length} trips found`);
+          
           if (trips.length === 0) continue;
 
           const tripRows = trips.map(t => ({
             idcode: v.idcode,
             nummerplaat: v.nummerplaat || t.vehicleName || null,
             naam: v.naam || t.vehicleName || null,
-            start_time: `${t.startDate || datum}T${t.startTime || '00:00:00'}`,
+            start_time: `${(t.startDate || datum).replace(/\//g, '-')}T${t.startTime || '00:00:00'}`,
             start_place: t.startPlace || null,
             start_lat: parseFloat(t.startLat) || null,
             start_lng: parseFloat(t.startLng) || null,
-            stop_time: `${t.stopDate || datum}T${t.stopTime || '23:59:59'}`,
+            stop_time: `${(t.stopDate || datum).replace(/\//g, '-')}T${t.stopTime || '23:59:59'}`,
             stop_place: t.stopPlace || null,
             stop_lat: parseFloat(t.stopLat) || null,
             stop_lng: parseFloat(t.stopLng) || null,
@@ -173,7 +202,7 @@ async function syncTripsIncremental() {
 
           // Delete old trips for this vehicle+date
           await httpsRequest(
-            `${SUPABASE_URL}/rest/v1/geofleet_trips?idcode=eq.${v.idcode}&start_time=gte.${datum}T00:00:00Z&start_time=lte.${datum}T23:59:59Z`,
+            `${SUPABASE_URL}/rest/v1/geofleet_trips?idcode=eq.${v.idcode}&start_time=gte.${isoDatum}T00:00:00Z&start_time=lte.${isoDatum}T23:59:59Z`,
             { method: 'DELETE', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } }
           );
 
@@ -183,7 +212,9 @@ async function syncTripsIncremental() {
             JSON.stringify(tripRows)
           );
           batchTrips += tripRows.length;
+          lastTripError = null;
         } catch (e) {
+          lastTripError = `${v.idcode}: ${e.message}`;
           console.warn(`[TRIPS] ${v.idcode} ${datum}:`, e.message);
         }
       }
@@ -193,8 +224,9 @@ async function syncTripsIncremental() {
     tripCount += batchTrips;
     tripSyncCount++;
     lastTripSync = new Date().toISOString();
-    console.log(`[TRIPS] Batch ${tripOffset}/${allVehicles.length}: ${batchTrips} trips from ${batch.map(v=>v.idcode).join(',')}`);
+    console.log(`[TRIPS] Batch done (offset ${tripOffset}/${allVehicles.length}): ${batchTrips} trips`);
   } catch (err) {
+    lastTripError = err.message;
     console.error('[TRIPS] Error:', err.message);
   }
 }
@@ -206,24 +238,24 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/status') {
     res.end(JSON.stringify({
-      status: 'running', version: '3.1', uptime: process.uptime(),
+      status: 'running', version: '3.2', uptime: process.uptime(),
       lastSync, lastTripSync, syncCount, tripSyncCount,
       vehicleCount, tripCount, tripOffset,
-      totalVehicles: allVehicles.length, lastError,
+      totalVehicles: allVehicles.length, lastError, lastTripError,
     }));
   } else if (req.url === '/trips/sync') {
     syncTripsIncremental().then(() => {
-      res.end(JSON.stringify({ ok: true, tripCount, lastTripSync, tripOffset }));
+      res.end(JSON.stringify({ ok: true, tripCount, lastTripSync, tripOffset, lastTripError }));
     }).catch(e => {
       res.end(JSON.stringify({ ok: false, error: e.message }));
     });
   } else {
-    res.end(JSON.stringify({ ok: true, message: 'GeoFleet Worker v3.1 — /status /trips/sync' }));
+    res.end(JSON.stringify({ ok: true, message: 'GeoFleet Worker v3.2 — /status /trips/sync' }));
   }
 });
 
 server.listen(PORT, () => {
-  console.log(`GeoFleet Worker v3.1 listening on :${PORT}`);
+  console.log(`GeoFleet Worker v3.2 listening on :${PORT}`);
   syncPositions();
   setInterval(syncPositions, SYNC_INTERVAL);
   setTimeout(() => {
