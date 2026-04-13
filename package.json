@@ -17,5 +17,8 @@
   "bugs": {
     "url": "https://github.com/Mustique37/geofleet-worker/issues"
   },
-  "homepage": "https://github.com/Mustique37/geofleet-worker#readme"
+  "homepage": "https://github.com/Mustique37/geofleet-worker#readme",
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
 }
