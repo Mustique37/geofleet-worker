@@ -1,5 +1,6 @@
-// geofleet-worker.mjs v3.5.2 — Railway Node.js worker
+// geofleet-worker.mjs v3.5.3 — Railway Node.js worker
 // Based on v3.4 (working) + added: /trips/sync-vehicle, /trips/sync-range, /debug-trip
+// FIX: Don't delete existing trips when API returns empty results
 import { createClient } from '@supabase/supabase-js';
 import http from 'node:http';
 import tls from 'node:tls';
@@ -10,16 +11,16 @@ const GEOFLEET_API_KEY = process.env.GEOFLEET_API_KEY;
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
-  console.error('[FATAL] Missing env vars. Need: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEOFLEET_API_KEY');
+  console.error('[FATAL] Missing env vars');
   const s = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'error', message: 'Missing env vars', hasUrl: !!SUPABASE_URL, hasKey: !!SUPABASE_KEY, hasGeo: !!GEOFLEET_API_KEY }));
   });
-  s.listen(PORT, '0.0.0.0', () => console.log(`[ERROR MODE] Listening on ${PORT}`));
+  s.listen(PORT, '0.0.0.0', () => console.log(`[ERROR] Listening on ${PORT}`));
 } else {
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
   const GEOFLEET_HOST = 'secure.geofleet.eu';
-  const VERSION = '3.5.2';
+  const VERSION = '3.5.3';
 
   let state = {
     version: VERSION, started: new Date().toISOString(),
@@ -61,7 +62,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     });
   }
 
-  // Return raw response for debugging
   function geofleetRequestRaw(path) {
     return new Promise((resolve, reject) => {
       const socket = tls.connect(443, GEOFLEET_HOST, { servername: GEOFLEET_HOST, ALPNProtocols: ['http/1.1'] }, () => {
@@ -91,7 +91,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     });
   }
 
-  // ─── Position Sync (identical to v3.4) ───
+  // ─── Position Sync ───
   async function syncPositions() {
     try {
       const geoData = await geofleetRequest(`/geoapi/v2.0/account/objects?apikey=${GEOFLEET_API_KEY}`);
@@ -129,59 +129,58 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     } catch (e) { state.lastError = e.message; }
   }
 
-  // ─── Extract trips from any response format ───
-  function extractTrips(data) {
-    // Try all known response formats
-    if (Array.isArray(data)) return data;
-    if (Array.isArray(data.results)) return data.results;
-    if (Array.isArray(data.result)) return data.result;
-    if (data.response) {
-      if (Array.isArray(data.response.results)) return data.response.results;
-      if (Array.isArray(data.response.result)) return data.response.result;
-      if (Array.isArray(data.response.trip)) return data.response.trip;
-      if (Array.isArray(data.response.trips)) return data.response.trips;
-    }
-    if (Array.isArray(data.trip)) return data.trip;
-    if (Array.isArray(data.trips)) return data.trips;
-    return [];
+  // ─── Build trip row from API response ───
+  function buildTripRow(idcode, t) {
+    // API returns: startDate "2022/03/04", startTime "08:48:44" → combine to ISO
+    const startDateTime = combineDateTime(t.startDate, t.startTime) || t.startTime || t.start_time || null;
+    const stopDateTime = combineDateTime(t.stopDate, t.stopTime) || t.stopTime || t.stop_time || null;
+    return {
+      idcode,
+      naam: t.vehicleName || t.naam || t.name || null,
+      nummerplaat: t.nummerplaat || t.licensePlate || null,
+      start_time: startDateTime,
+      stop_time: stopDateTime,
+      start_place: t.startPlace || t.start_place || null,
+      stop_place: t.stopPlace || t.stop_place || null,
+      start_lat: parseFloat(t.startLat) || null,
+      start_lng: parseFloat(t.startLng) || null,
+      stop_lat: parseFloat(t.stopLat) || null,
+      stop_lng: parseFloat(t.stopLng) || null,
+      distance: parseFloat(t.distance) || 0,
+      drive_time: t.driveTime || t.drive_time || null,
+      odometer: parseFloat(t.odometer) || null,
+      drivers: t.drivers || t.bestuurder || null,
+      is_private: t.isPrivatTrip || t.isPrivate || false,
+    };
+  }
+
+  function combineDateTime(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return null;
+    // dateStr: "2022/03/04" or "2022-03-04"
+    const d = dateStr.replace(/\//g, '-');
+    return `${d}T${timeStr}Z`;
   }
 
   // ─── Trip Sync for one vehicle + one day ───
+  // CRITICAL FIX: Only delete existing trips if API returns new data
   async function syncTripsForVehicle(idcode, datum) {
     const data = await geofleetRequest(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
-    const trips = extractTrips(data);
-    if (trips.length === 0) return 0;
+    const trips = data.results || data.result || [];
+    if (!Array.isArray(trips) || trips.length === 0) return 0; // DON'T delete existing data!
 
+    // Only delete+insert if we got actual trip data
     await supabase.from('geofleet_trips').delete()
       .eq('idcode', idcode)
       .gte('start_time', `${datum}T00:00:00Z`)
       .lte('start_time', `${datum}T23:59:59Z`);
 
-    const rows = trips.map(t => ({
-      idcode,
-      naam: t.naam || t.name || null,
-      nummerplaat: t.nummerplaat || t.licensePlate || null,
-      start_time: t.startTime || t.start_time || t.starttime || null,
-      stop_time: t.stopTime || t.stop_time || t.stoptime || null,
-      start_place: t.startPlace || t.start_place || t.startplace || null,
-      stop_place: t.stopPlace || t.stop_place || t.stopplace || null,
-      start_lat: t.startLat || t.start_lat || t.startlat || null,
-      start_lng: t.startLng || t.start_lng || t.startlng || null,
-      stop_lat: t.stopLat || t.stop_lat || t.stoplat || null,
-      stop_lng: t.stopLng || t.stop_lng || t.stoplng || null,
-      distance: t.distance || t.afstand || null,
-      drive_time: t.driveTime || t.drive_time || t.drivetime || null,
-      odometer: t.odometer || null,
-      drivers: t.drivers || t.bestuurder || null,
-      is_private: t.isPrivate || t.is_private || false,
-    }));
-
+    const rows = trips.map(t => buildTripRow(idcode, t));
     const { error } = await supabase.from('geofleet_trips').insert(rows);
     if (error) console.error(`[TRIP] Insert ${idcode}/${datum}:`, error.message);
     return rows.length;
   }
 
-  // ─── Incremental trip sync (identical to v3.4) ───
+  // ─── Incremental trip sync ───
   async function syncTripsIncremental() {
     try {
       const { data: vehicles } = await supabase.from('geofleet_cache').select('idcode').order('idcode');
@@ -193,8 +192,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
       const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
       let count = 0;
       for (const v of batch) {
-        count += await syncTripsForVehicle(v.idcode, today);
-        count += await syncTripsForVehicle(v.idcode, yesterday);
+        try { count += await syncTripsForVehicle(v.idcode, today); } catch (e) { console.error(`[TRIP] ${v.idcode} today:`, e.message); }
+        try { count += await syncTripsForVehicle(v.idcode, yesterday); } catch (e) { console.error(`[TRIP] ${v.idcode} yesterday:`, e.message); }
       }
       state.tripOffset += 3;
       if (state.tripOffset >= vehicles.length) state.tripOffset = 0;
@@ -205,7 +204,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     } catch (e) { state.lastTripError = e.message; }
   }
 
-  // ─── NEW: Manual sync for date range ───
+  // ─── Manual sync for date range ───
   async function syncVehicleRange(idcode, fromDate, toDate) {
     let total = 0;
     const from = new Date(fromDate), to = new Date(toDate);
@@ -258,7 +257,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
         const count = await syncAllVehiclesRange(from, to);
         json({ ok: true, from, to, tripsFound: count });
       } else if (p === '/debug-trip') {
-        // Debug endpoint: shows raw API response for a vehicle+date
         const idcode = url.searchParams.get('idcode') || '621946';
         const datum = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
         const raw = await geofleetRequestRaw(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
