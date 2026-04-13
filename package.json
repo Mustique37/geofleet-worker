@@ -1,25 +1,8 @@
 {
-  "name": "geofleet",
-  "version": "1.0.0",
-  "description": "",
-  "main": "geofleet-worker.js",
-  "scripts": {
-  "start": "node geofleet-worker.js",
-  "test": "echo \"Error: no test specified\" && exit 1"
-},
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Mustique37/geofleet-worker.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "name": "geofleet-worker",
+  "private": true,
   "type": "module",
-  "bugs": {
-    "url": "https://github.com/Mustique37/geofleet-worker/issues"
-  },
-  "homepage": "https://github.com/Mustique37/geofleet-worker#readme",
-  "dependencies": {
-    "node-fetch": "^3.3.2"
+  "scripts": {
+    "start": "node geofleet-worker.mjs"
   }
 }
