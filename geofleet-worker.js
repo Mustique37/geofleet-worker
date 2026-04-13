@@ -41,6 +41,7 @@ function geofleetRawRequest(path) {
           `Host: ${GEOFLEET_HOST}`,
           `x-api-key: ${GEOFLEET_API_KEY}`,
           `Accept: application/json`,
+          `User-Agent: GeoFleetSync/1.0`,
           `Connection: close`,
           '', ''
         ].join('\r\n');
@@ -171,8 +172,13 @@ http.createServer(async (req, res) => {
     res.end(JSON.stringify({ running: true, syncCount, errorCount, lastError, lastSyncTime, uptime: process.uptime() }));
   } else if (url.pathname === '/debug') {
     const r = {};
-    try { const d = await geofleetRawRequest('/geoapi/v2.0/read'); r.geofleet = { ok: true, objects: (d.response?.object || d.objects || []).length }; }
-    catch (e) { r.geofleet = { ok: false, error: e.message }; }
+    try { 
+      const d = await geofleetRawRequest('/geoapi/v2.0/read'); 
+      r.geofleet = { ok: true, objects: (d.response?.object || d.objects || []).length, keys: Object.keys(d) }; 
+    }
+    catch (e) { 
+      r.geofleet = { ok: false, error: e.message, keyPresent: !!GEOFLEET_API_KEY, keyLength: GEOFLEET_API_KEY?.length }; 
+    }
     try { const s = await fetch(`${SUPABASE_URL}/rest/v1/geofleet_cache?select=idcode&limit=1`, { headers: { 'apikey': SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` } }); r.supabase = { ok: s.ok, status: s.status }; }
     catch (e) { r.supabase = { ok: false, error: e.message }; }
     res.end(JSON.stringify(r, null, 2));
