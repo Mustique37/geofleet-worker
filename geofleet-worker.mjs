@@ -1,5 +1,5 @@
-// geofleet-worker.mjs v3.5.1 — Railway Node.js worker
-// Based on v3.4 (working) + added: /trips/sync-vehicle and /trips/sync-range endpoints
+// geofleet-worker.mjs v3.5.2 — Railway Node.js worker
+// Based on v3.4 (working) + added: /trips/sync-vehicle, /trips/sync-range, /debug-trip
 import { createClient } from '@supabase/supabase-js';
 import http from 'node:http';
 import tls from 'node:tls';
@@ -9,20 +9,17 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GEOFLEET_API_KEY = process.env.GEOFLEET_API_KEY;
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
-// Guard: start HTTP server FIRST so healthcheck passes, even if config is missing
 if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
   console.error('[FATAL] Missing env vars. Need: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEOFLEET_API_KEY');
-  // Still start HTTP server so Railway healthcheck passes and we can debug via /status
   const s = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'error', message: 'Missing env vars', hasUrl: !!SUPABASE_URL, hasKey: !!SUPABASE_KEY, hasGeo: !!GEOFLEET_API_KEY }));
   });
-  s.listen(PORT, '0.0.0.0', () => console.log(`[ERROR MODE] Listening on ${PORT} — fix env vars!`));
+  s.listen(PORT, '0.0.0.0', () => console.log(`[ERROR MODE] Listening on ${PORT}`));
 } else {
-  // ─── Normal operation ───
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
   const GEOFLEET_HOST = 'secure.geofleet.eu';
-  const VERSION = '3.5.1';
+  const VERSION = '3.5.2';
 
   let state = {
     version: VERSION, started: new Date().toISOString(),
@@ -58,6 +55,36 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
           }
           resolve(JSON.parse(body));
         } catch (e) { reject(new Error(`Parse error: ${e.message}`)); }
+      });
+      socket.on('error', reject);
+      socket.setTimeout(30000, () => { socket.destroy(); reject(new Error('Timeout')); });
+    });
+  }
+
+  // Return raw response for debugging
+  function geofleetRequestRaw(path) {
+    return new Promise((resolve, reject) => {
+      const socket = tls.connect(443, GEOFLEET_HOST, { servername: GEOFLEET_HOST, ALPNProtocols: ['http/1.1'] }, () => {
+        socket.write(`GET ${path} HTTP/1.1\r\nHost: ${GEOFLEET_HOST}\r\nUser-Agent: GeoFleetSync/3.5\r\nAccept: application/json\r\nConnection: close\r\n\r\n`);
+      });
+      let data = '';
+      socket.on('data', chunk => data += chunk.toString());
+      socket.on('end', () => {
+        const bodyStart = data.indexOf('\r\n\r\n');
+        let body = bodyStart > -1 ? data.slice(bodyStart + 4) : data;
+        if (data.toLowerCase().includes('transfer-encoding: chunked')) {
+          let decoded = '', rest = body;
+          while (rest.length > 0) {
+            const nl = rest.indexOf('\r\n');
+            if (nl === -1) break;
+            const size = parseInt(rest.slice(0, nl), 16);
+            if (size === 0) break;
+            decoded += rest.slice(nl + 2, nl + 2 + size);
+            rest = rest.slice(nl + 2 + size + 2);
+          }
+          body = decoded;
+        }
+        resolve(body);
       });
       socket.on('error', reject);
       socket.setTimeout(30000, () => { socket.destroy(); reject(new Error('Timeout')); });
@@ -102,11 +129,28 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     } catch (e) { state.lastError = e.message; }
   }
 
-  // ─── Trip Sync for one vehicle + one day (identical to v3.4) ───
+  // ─── Extract trips from any response format ───
+  function extractTrips(data) {
+    // Try all known response formats
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.results)) return data.results;
+    if (Array.isArray(data.result)) return data.result;
+    if (data.response) {
+      if (Array.isArray(data.response.results)) return data.response.results;
+      if (Array.isArray(data.response.result)) return data.response.result;
+      if (Array.isArray(data.response.trip)) return data.response.trip;
+      if (Array.isArray(data.response.trips)) return data.response.trips;
+    }
+    if (Array.isArray(data.trip)) return data.trip;
+    if (Array.isArray(data.trips)) return data.trips;
+    return [];
+  }
+
+  // ─── Trip Sync for one vehicle + one day ───
   async function syncTripsForVehicle(idcode, datum) {
     const data = await geofleetRequest(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
-    const trips = data.results || data.response?.results || [];
-    if (!Array.isArray(trips) || trips.length === 0) return 0;
+    const trips = extractTrips(data);
+    if (trips.length === 0) return 0;
 
     await supabase.from('geofleet_trips').delete()
       .eq('idcode', idcode)
@@ -117,23 +161,23 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
       idcode,
       naam: t.naam || t.name || null,
       nummerplaat: t.nummerplaat || t.licensePlate || null,
-      start_time: t.startTime || t.start_time,
-      stop_time: t.stopTime || t.stop_time,
-      start_place: t.startPlace || t.start_place || null,
-      stop_place: t.stopPlace || t.stop_place || null,
-      start_lat: t.startLat || t.start_lat || null,
-      start_lng: t.startLng || t.start_lng || null,
-      stop_lat: t.stopLat || t.stop_lat || null,
-      stop_lng: t.stopLng || t.stop_lng || null,
+      start_time: t.startTime || t.start_time || t.starttime || null,
+      stop_time: t.stopTime || t.stop_time || t.stoptime || null,
+      start_place: t.startPlace || t.start_place || t.startplace || null,
+      stop_place: t.stopPlace || t.stop_place || t.stopplace || null,
+      start_lat: t.startLat || t.start_lat || t.startlat || null,
+      start_lng: t.startLng || t.start_lng || t.startlng || null,
+      stop_lat: t.stopLat || t.stop_lat || t.stoplat || null,
+      stop_lng: t.stopLng || t.stop_lng || t.stoplng || null,
       distance: t.distance || t.afstand || null,
-      drive_time: t.driveTime || t.drive_time || null,
+      drive_time: t.driveTime || t.drive_time || t.drivetime || null,
       odometer: t.odometer || null,
       drivers: t.drivers || t.bestuurder || null,
       is_private: t.isPrivate || t.is_private || false,
     }));
 
     const { error } = await supabase.from('geofleet_trips').insert(rows);
-    if (error) throw new Error(error.message);
+    if (error) console.error(`[TRIP] Insert ${idcode}/${datum}:`, error.message);
     return rows.length;
   }
 
@@ -161,12 +205,12 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     } catch (e) { state.lastTripError = e.message; }
   }
 
-  // ─── NEW in v3.5: Manual sync for date range ───
+  // ─── NEW: Manual sync for date range ───
   async function syncVehicleRange(idcode, fromDate, toDate) {
     let total = 0;
     const from = new Date(fromDate), to = new Date(toDate);
     for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
-      try { total += await syncTripsForVehicle(idcode, d.toISOString().split('T')[0]); } catch {}
+      try { total += await syncTripsForVehicle(idcode, d.toISOString().split('T')[0]); } catch (e) { console.error(`[SYNC] ${idcode} ${d.toISOString().split('T')[0]}: ${e.message}`); }
       await new Promise(r => setTimeout(r, 500));
     }
     return total;
@@ -213,6 +257,13 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
         if (!from || !to) return json({ error: 'Need: from, to' }, 400);
         const count = await syncAllVehiclesRange(from, to);
         json({ ok: true, from, to, tripsFound: count });
+      } else if (p === '/debug-trip') {
+        // Debug endpoint: shows raw API response for a vehicle+date
+        const idcode = url.searchParams.get('idcode') || '621946';
+        const datum = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
+        const raw = await geofleetRequestRaw(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(raw);
       } else {
         json({ error: 'Not found' }, 404);
       }
