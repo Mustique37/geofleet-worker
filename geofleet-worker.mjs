@@ -1,6 +1,5 @@
-// geofleet-worker.mjs v3.5.3 — Railway Node.js worker
-// Based on v3.4 (working) + added: /trips/sync-vehicle, /trips/sync-range, /debug-trip
-// FIX: Don't delete existing trips when API returns empty results
+// geofleet-worker.mjs v3.5.4 — Railway Node.js worker
+// FIX: Date format must be YYYY/MM/DD for GeoFleet API (not YYYY-MM-DD)
 import { createClient } from '@supabase/supabase-js';
 import http from 'node:http';
 import tls from 'node:tls';
@@ -20,7 +19,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
 } else {
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
   const GEOFLEET_HOST = 'secure.geofleet.eu';
-  const VERSION = '3.5.3';
+  const VERSION = '3.5.4';
 
   let state = {
     version: VERSION, started: new Date().toISOString(),
@@ -29,6 +28,11 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
     lastError: null, lastTripError: null,
     vehicleCount: 0, tripOffset: 0,
   };
+
+  // Convert YYYY-MM-DD to YYYY/MM/DD for GeoFleet API
+  function toGeoDate(isoDate) {
+    return isoDate.replace(/-/g, '/');
+  }
 
   function geofleetRequest(path) {
     return new Promise((resolve, reject) => {
@@ -131,7 +135,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
 
   // ─── Build trip row from API response ───
   function buildTripRow(idcode, t) {
-    // API returns: startDate "2022/03/04", startTime "08:48:44" → combine to ISO
     const startDateTime = combineDateTime(t.startDate, t.startTime) || t.startTime || t.start_time || null;
     const stopDateTime = combineDateTime(t.stopDate, t.stopTime) || t.stopTime || t.stop_time || null;
     return {
@@ -156,19 +159,20 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
 
   function combineDateTime(dateStr, timeStr) {
     if (!dateStr || !timeStr) return null;
-    // dateStr: "2022/03/04" or "2022-03-04"
+    // dateStr: "2022/03/04" or "2022-03-04" → always output ISO
     const d = dateStr.replace(/\//g, '-');
     return `${d}T${timeStr}Z`;
   }
 
   // ─── Trip Sync for one vehicle + one day ───
-  // CRITICAL FIX: Only delete existing trips if API returns new data
+  // datum must be YYYY-MM-DD (ISO), converted to YYYY/MM/DD for API
   async function syncTripsForVehicle(idcode, datum) {
-    const data = await geofleetRequest(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
+    const geoDatum = toGeoDate(datum); // YYYY/MM/DD for GeoFleet API
+    const data = await geofleetRequest(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${geoDatum}&fromtime=00:00:00&to=${geoDatum}&totime=23:59:59`);
     const trips = data.results || data.result || [];
-    if (!Array.isArray(trips) || trips.length === 0) return 0; // DON'T delete existing data!
+    if (!Array.isArray(trips) || trips.length === 0) return 0;
 
-    // Only delete+insert if we got actual trip data
+    // Delete existing trips for this vehicle+date, then insert fresh
     await supabase.from('geofleet_trips').delete()
       .eq('idcode', idcode)
       .gte('start_time', `${datum}T00:00:00Z`)
@@ -259,7 +263,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !GEOFLEET_API_KEY) {
       } else if (p === '/debug-trip') {
         const idcode = url.searchParams.get('idcode') || '621946';
         const datum = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
-        const raw = await geofleetRequestRaw(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${datum}&fromtime=00:00:00&to=${datum}&totime=23:59:59`);
+        const geoDatum = toGeoDate(datum); // YYYY/MM/DD
+        const raw = await geofleetRequestRaw(`/geoapi/v2.0/report/trips?apikey=${GEOFLEET_API_KEY}&id=${idcode}&from=${geoDatum}&fromtime=00:00:00&to=${geoDatum}&totime=23:59:59`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(raw);
       } else {
